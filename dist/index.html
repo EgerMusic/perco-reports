@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Ведомости по проходам сотрудников PERCo">
+  <title>Производство · Учёт времени</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar"><div class="wrap topbar-inner"><div class="brand-icon" aria-hidden="true"><span></span><span></span><span></span></div><div class="brand-copy"><strong>ПРОИЗВОДСТВО</strong><small>Учёт времени · PERCo</small></div><div class="topbar-status"><i></i> Локальный отчёт</div></div></header>
+  <main class="wrap">
+    <section class="masthead"><div><div class="eyebrow">УЧЁТ ПРОХОДОВ / ВЕДОМОСТИ</div><h1>Рабочее время<br><em>по участкам</em></h1><p>Загрузи выгрузку PERCo и выбери период.</p></div><div class="pipe-art" aria-hidden="true"><div class="pipe pipe-a"></div><div class="pipe pipe-b"></div><div class="pipe pipe-c"></div><div class="pipe-caption">ТРУБЫ · ППУ · ФАСОННЫЕ ИЗДЕЛИЯ</div></div></section>
+    <section class="toolbar" aria-label="Исходные данные и параметры">
+      <div class="file-control"><label class="upload-button" for="files"><span aria-hidden="true">＋</span> Загрузить Excel</label><input id="files" type="file" accept=".xlsx" multiple><span id="file-list" class="file-list" aria-live="polite">Файл не выбран</span><button id="clear-data" type="button" class="text-button" hidden>Очистить</button></div>
+      <div id="workspace" hidden>
+        <div class="filter-row"><label>С даты<input id="from-date" type="date"></label><label>По дату<input id="to-date" type="date"></label><label>Период<select id="group"><option value="day">День</option><option value="week">Неделя</option><option value="month">Месяц</option></select></label><label>Сортировка<select id="sort"><option value="name">По фамилии</option><option value="date-asc">По дате ↑</option><option value="date-desc">По дате ↓</option></select></label><button id="calculate" type="button" class="primary">Показать</button><button id="export-all" type="button" class="export-button">↓ Скачать Excel</button></div>
+        <div id="summary" class="summary" aria-live="polite"></div>
+        <section class="results" aria-labelledby="results-title"><div class="section-heading"><div><div class="eyebrow">РЕЗУЛЬТАТ</div><h2 id="results-title">Ведомости</h2></div><div class="tabs" role="tablist" aria-label="Ведомости"><button class="tab active" type="button" role="tab" aria-selected="true" data-tab="plant">Время на заводе</button><button class="tab" type="button" role="tab" aria-selected="false" data-tab="shops">Время по цехам</button><button class="tab" type="button" role="tab" aria-selected="false" data-tab="timeline">Хронология</button></div></div>
+          <div class="table-card" data-panel="plant"><div class="table-scroll"><table id="plant-table"></table></div></div>
+          <div class="table-card" data-panel="shops" hidden><div class="table-scroll"><table id="shop-table"></table></div></div>
+          <div class="table-card" data-panel="timeline" hidden><div class="table-scroll"><table id="timeline-table"></table></div></div>
+        </section>
+        <section class="issues-section" id="issues-section"><div class="section-heading"><div><div class="eyebrow">СВЕРКА ДАННЫХ</div><h2>Несостыковки <span id="issue-count" class="count"></span></h2></div></div><div id="issues" class="issues-list"></div><div id="changes"></div></section>
+      </div>
+    </section>
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+  </main>
+  <script src="vendor/jszip.min.js"></script><script type="module" src="app.mjs"></script>
+</body>
+</html>
