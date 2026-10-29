@@ -1,0 +1,9 @@
+deploy-pages:
+  image: alpine:3
+  stage: deploy
+  script:
+    - test -f dist/index.html
+  pages:
+    publish: dist
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
