@@ -1,0 +1,38 @@
+import assert from 'node:assert/strict';
+import {parseEvents,parseStamp,duration,normalizeId} from './dist/core.mjs';
+import {parseSchedule,parsePresence,buildShiftReport,aggregateShops} from './dist/plan.mjs';
+const O='Неконтролируемая территория',H='Территория холдинга',W='Цех №2';
+const headers=['Фамилия','Имя','Отчество','Табельный номер','Дата','Выход из','Вход в','Подразделение'];
+const event=(ts,from,to)=>['Тест','Иван','Иванович','1',ts,from,to,'Цех №2'];
+function plan(codes=['11'],colors=['FFFFFF'],title='Ноябрь 2026',days=['1']){
+  const rows=[[title],['ФИО','Таб. №',...days],['Тест И.И.','1',...codes]];
+  rows.cellStyles=[[],[],[{}, {},...colors.map(fillColor=>({fillColor}))]];
+  return parseSchedule(rows,'plan.xlsx');
+}
+const presence=template=>parsePresence([['Фамилия','Имя','Отчество','Табельный номер','Подразделение','Дата','График работы'],['Тест','Иван','Иванович','1','Цех №2','01-11-2026',template]]);
+const ev=rows=>parseEvents([headers,...rows],'events.xlsx').events;
+const double=ev([event('01-11-2026 06:40:00',O,H),event('01-11-2026 06:50:00',H,W),event('01-11-2026 18:30:00',W,H),event('01-11-2026 18:35:00',H,O),event('01-11-2026 18:45:00',O,H),event('01-11-2026 18:50:00',H,W),event('02-11-2026 07:00:00',W,H),event('02-11-2026 07:15:00',H,O)]);
+let r=buildShiftReport(double,plan(),presence('С 07:00 до 19:00'),'2026-11-01','2026-11-01');
+assert.equal(r.rows.length,2,'two working shifts on one calendar date must stay separate');
+assert(r.rows.some(x=>x.status==='Выход вне графика'));
+assert.equal(duration(aggregateShops(r,'month').rows[0].lunchShop),'2:00');
+const consecutive=ev([event('01-11-2026 18:40:00',O,H),event('01-11-2026 18:50:00',H,W),event('02-11-2026 06:30:00',W,H),event('02-11-2026 06:35:00',H,O),event('02-11-2026 06:45:00',O,H),event('02-11-2026 06:50:00',H,W),event('02-11-2026 19:00:00',W,H),event('02-11-2026 19:15:00',H,O)]);
+r=buildShiftReport(consecutive,plan(['11','11'],['808080','FFFFFF'],'Ноябрь 2026',['1','2']),presence('С 07:00 до 19:00'),'2026-11-01','2026-11-02');
+assert.equal(r.rows.filter(x=>x.observed).length,2,'night shift followed by day shift must not merge');
+assert.equal(duration(r.rows[1].span),'12:10');
+const unknown=buildShiftReport(double.slice(0,4),plan(['непонятно']),presence('С 07:00 до 19:00'),'2026-11-01','2026-11-01').rows[0];
+assert.notEqual(unknown.status,'Выход вне графика','unknown plan code must not mean day off');
+assert(unknown.comments.some(c=>c.includes('обозначение')));
+assert(Number.isNaN(parseStamp('01-11-2026 07:65:00')),'invalid clock must not roll forward silently');
+assert.equal(normalizeId('00А1'),'00А1','alphanumeric employee IDs must preserve significant leading zeroes');
+const padded=headers.map(h=>' '+h+' '), paddedEvents=parseEvents([padded,event('01-11-2026 07:00:00',H,W)]).events;
+assert.equal(paddedEvents.length,1,'trim header whitespace consistently');
+assert.equal(plan(['11'],['FFFFFF'],'Декабрь 2027',['31']).people[0].days['2027-12-31'].code,'11');
+assert.equal(Object.keys(plan(['11','11'],['FFFFFF','FFFFFF'],'Февраль 2028',['28','29']).people[0].days).length,2);
+assert.equal(Object.keys(plan(['11','11'],['FFFFFF','FFFFFF'],'Февраль 2027',['28','29']).people[0].days).length,1);
+const duplicate=[['Ноябрь 2026'],['ФИО','Таб. №','1'],['Тест И.И.','1','11'],['Тест И.И.','1','11']];
+assert.throws(()=>parseSchedule(duplicate),/повтор/i,'same planned person cannot cause double counting');
+const separated=[...parseEvents([headers,...[event('01-11-2026 06:40:00',O,H),event('01-11-2026 06:50:00',H,W),event('01-11-2026 19:00:00',W,H),event('01-11-2026 19:15:00',H,O)]],'part1.xlsx').events,...parseEvents([headers,...[event('03-11-2026 06:40:00',O,H),event('03-11-2026 06:50:00',H,W),event('03-11-2026 19:00:00',W,H),event('03-11-2026 19:15:00',H,O)]],'part3.xlsx').events];
+const uncovered=buildShiftReport(separated,plan(['11'],['FFFFFF'],'Ноябрь 2026',['2']),presence('С 07:00 до 19:00'),'2026-11-02','2026-11-02').rows[0];
+assert.equal(uncovered.status,'Недостаточно данных','a gap between uploaded files must not become absence');
+console.log('Robustness checks passed: separate shifts, unknown codes, invalid timestamps, trimmed headers, new month/year, leap dates, duplicate roster rows.');

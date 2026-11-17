@@ -21,7 +21,7 @@ export async function workbookBytes(sheets, Zip = globalThis.JSZip) {
     const data = [sheet.headers, ...sheet.rows];
     const width = sheet.headers.length;
     const rows = data.map((values, rowIndex) => {
-      const height = rowIndex ? Math.min(90, Math.max(20, Math.max(...values.map((value, j) => String(value ?? '').split('\n').reduce((lines, part) => lines + Math.max(1, Math.ceil(part.length / Math.max(10, (sheet.columnWidths?.[j] ?? 24) - 3))), 0))) * 16)) : 25;
+      const height = rowIndex ? Math.min(409, Math.max(20, Math.max(...values.map((value, j) => String(value ?? '').split('\n').reduce((lines, part) => lines + Math.max(1, Math.ceil(part.length / Math.max(10, (sheet.columnWidths?.[j] ?? 24) - 3))), 0))) * 16)) : 25;
       const cells = values.map((value, j) => {
         const style = rowIndex === 0 ? excelStyle.header : sheet.cellStyles?.[rowIndex - 1]?.[j] ?? sheet.rowStyles?.[rowIndex - 1] ?? excelStyle.plain;
         return `<c r="${col(j)}${rowIndex + 1}" s="${style}" t="inlineStr"><is><t xml:space="preserve">${xml(value)}</t></is></c>`;

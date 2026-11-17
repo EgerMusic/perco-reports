@@ -1,34 +1,53 @@
 export const OUTSIDE = 'Неконтролируемая территория';
 export const HOLDING = 'Территория холдинга';
+export const normalizeId = value => {
+  const id=String(value ?? '').replace(/\s+/g, '').toUpperCase();
+  return /^\d+$/.test(id)?id.replace(/^0+(?=\d)/,''):id;
+};
+export const personKey = (id, name, department = '') => [normalizeId(id), String(name).trim().toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/\s+/g, ' '), department.trim().toLocaleLowerCase('ru')].join('|');
 
 export function parseStamp(value) {
   if (value instanceof Date) return value.getTime();
   const match = String(value ?? '').trim().match(/^(\d{2})[-.](\d{2})[-.](\d{4})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
   if (!match) return NaN;
   const [, d, m, y, h, min, sec = '0'] = match;
+  if (+h > 23 || +min > 59 || +sec > 59) return NaN;
   const date = new Date(+y, +m - 1, +d, +h, +min, +sec);
   return date.getFullYear() === +y && date.getMonth() === +m - 1 && date.getDate() === +d ? date.getTime() : NaN;
 }
 
 export function parseEvents(rows, fileName = '') {
-  const headerIndex = rows.findIndex(row => row.includes('Табельный номер') && row.includes('Выход из') && row.includes('Вход в'));
+  const headerIndex = rows.findIndex(row => row?.map(v => String(v ?? '').trim()).includes('Табельный номер') && row?.map(v => String(v ?? '').trim()).includes('Выход из') && row?.map(v => String(v ?? '').trim()).includes('Вход в'));
   if (headerIndex < 0) throw new Error('Не найдены заголовки PERCo: «Табельный номер», «Выход из», «Вход в».');
-  const names = rows[headerIndex].map(v => String(v ?? '').trim());
+  let names = rows[headerIndex].map(v => String(v ?? '').trim());
   const col = key => names.indexOf(key);
   const required = ['Дата', 'Табельный номер', 'Выход из', 'Вход в'];
   if (required.some(key => col(key) < 0)) throw new Error('Выгрузка не содержит нужных столбцов PERCo.');
   const events = [], rejected = [];
+  let activeSheet = rows.rowSources?.[headerIndex]?.sheetName, awaitingHeader = false;
   for (let i = headerIndex + 1; i < rows.length; i++) {
-    const row = rows[i];
+    const row = rows[i] || [];
+    const sheetName = rows.rowSources?.[i]?.sheetName || rows.sheetName || '';
+    if (rows.rowSources && sheetName !== activeSheet) { activeSheet = sheetName; awaitingHeader = true; }
+    const trimmed = row.map(v => String(v ?? '').trim());
+    if (required.every(key => trimmed.includes(key))) { names = trimmed; awaitingHeader = false; continue; }
+    if (awaitingHeader) continue;
     if (row.every(v => v == null || String(v).trim() === '')) continue;
     const ts = parseStamp(row[col('Дата')]);
-    const id = String(row[col('Табельный номер')] ?? '').trim();
+    const id = normalizeId(row[col('Табельный номер')]);
     const from = String(row[col('Выход из')] ?? '').trim();
     const to = String(row[col('Вход в')] ?? '').trim();
     if (!Number.isFinite(ts) || !id || !from || !to) { rejected.push(i + 1); continue; }
     const name = ['Фамилия', 'Имя', 'Отчество'].map(key => String(row[col(key)] ?? '').trim()).filter(Boolean).join(' ');
     const card = String(row[col('Карта №')] ?? '').trim();
-    events.push({ id, name, card, ts, from, to, fileName, rowNumber: i + 1, key: [id, ts, from, to, card].join('|') });
+    const department = String(row[col('Подразделение')] ?? '').trim();
+    const employeeKey = personKey(id, name, department);
+    const rowNumber = rows.rowSources?.[i]?.rowNumber || i + 1;
+    events.push({ id, name, department, employeeKey, card, ts, from, to, fileName, rowNumber, sheetName, key: [employeeKey, ts, from, to, card].join('|') });
+  }
+  if (events.length) {
+    const coverage = events.reduce((range,e)=>({start:Math.min(range.start,e.ts),end:Math.max(range.end,e.ts)}),{start:Infinity,end:-Infinity});
+    for (const event of events) event.fileCoverage = coverage;
   }
   return { events, rejected };
 }
@@ -52,11 +71,13 @@ export function issueKey(a, b) { return `${a.id}|${a.ts}|${b.ts}|${a.to}|${b.fro
 export function analyze(events, corrections = {}) {
   const byEmployee = new Map();
   for (const event of dedupeEvents(events)) {
-    if (!byEmployee.has(event.id)) byEmployee.set(event.id, []);
-    byEmployee.get(event.id).push(event);
+    const key = event.employeeKey || event.id;
+    if (!byEmployee.has(key)) byEmployee.set(key, []);
+    byEmployee.get(key).push(event);
   }
   const sessions = [], segments = [], issues = [];
-  for (const [id, list] of byEmployee) {
+  for (const [, list] of byEmployee) {
+    const id = list[0].id;
     let startIndex = -1;
     for (let i = 0; i < list.length; i++) {
       const event = list[i];
@@ -72,14 +93,14 @@ export function analyze(events, corrections = {}) {
         }
         const entryEvent = list[startIndex];
         if (event.ts > entryEvent.ts) {
-          const session = { id, name: event.name || entryEvent.name, start: entryEvent.ts, end: event.ts, entry: entryEvent, exit: event };
+          const session = { id, employeeKey: entryEvent.employeeKey, name: event.name || entryEvent.name, start: entryEvent.ts, end: event.ts, entry: entryEvent, exit: event };
           sessions.push(session);
           for (let j = startIndex; j < i; j++) {
             const a = list[j], b = list[j + 1];
             if (b.ts <= a.ts) continue;
             const from = normalized(a.to), to = normalized(b.from);
             if (from === to) {
-              segments.push({ id, name: session.name, start: a.ts, end: b.ts, zone: from, kind: zoneKind(from), sourceStart: a, sourceEnd: b });
+              segments.push({ id, employeeKey: session.employeeKey, name: session.name, start: a.ts, end: b.ts, zone: from, kind: zoneKind(from), sourceStart: a, sourceEnd: b });
             } else {
               const key = issueKey(a, b);
               const cut = Number(corrections[key]?.cut ?? corrections[key]);
