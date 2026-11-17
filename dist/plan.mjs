@@ -206,6 +206,10 @@ export function buildShiftReport(events, schedule, presence, fromDate, toDate) {
   }
   for (const actual of actualPeople.values()) if (!used.has(actual.key)) people.push(actual);
   const coverageStart = sorted[0]?.ts ?? Infinity, coverageEnd = sorted.at(-1)?.ts ?? -Infinity;
+  // A monthly plan is not evidence for dates beyond the uploaded passes.
+  if (!sorted.length) return { rows, shops: [], coverageStart, coverageEnd, warnings: schedule?.warnings || [] };
+  const throughDate = localDate(coverageEnd);
+  if (toDate > throughDate) toDate = throughDate;
   const coverageRanges = [...new Map(events.filter(e=>e.fileCoverage).map(e=>[`${e.fileCoverage.start}|${e.fileCoverage.end}`,e.fileCoverage])).values()].sort((a,b)=>a.start-b.start);
   const covers = (start,end) => {
     if(start==null)return false;
@@ -252,7 +256,9 @@ export function buildShiftReport(events, schedule, presence, fromDate, toDate) {
       if (plan.conflict) warn(plan.conflict);
       const covered = covers(plan.start,plan.end);
       if (!fact.observed) {
-        state.level = 'gray'; state.label = covered && person.events.length ? 'Нет отметок за плановую смену' : 'Недостаточно данных';
+        const missingShift = covered && person.events.length > 0 && !person.matchConflict && !plan.conflict;
+        state.level = missingShift ? 'red' : 'gray';
+        state.label = missingShift ? 'Нет отметок за плановую смену' : 'Недостаточно данных';
         if (!person.events.length) messages.push('Сотрудник не найден в подробных проходах');
         else if (!covered) messages.push('Смена не покрыта выгрузкой полностью');
       } else {

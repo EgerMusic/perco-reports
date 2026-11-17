@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { parseEvents, duration } from './dist/core.mjs';
-import { parseSchedule, parsePresence, buildShiftReport, aggregateShops } from './dist/plan.mjs';
+import { parseSchedule, parsePresence, buildShiftReport, aggregateShops, shortName } from './dist/plan.mjs';
 
 const headers = ['Фамилия','Имя','Отчество','Табельный номер','Дата','Выход из','Вход в','Подразделение'];
 const O='Неконтролируемая территория', H='Территория холдинга', W='Цех №2';
@@ -52,4 +52,29 @@ const dayOff=buildShiftReport(complete,schedule('в'),null,'2026-11-01','2026-11
 const leadingExit=events([event('30-11-2026 07:00:00',W,H),event('30-11-2026 07:15:00',H,O),...night.map(e=>event(new Date(e.ts).toLocaleString('ru-RU').replace(',',''),e.from,e.to))]);
 r=buildShiftReport(leadingExit,schedule('11','808080',['30']),presence('С 07:00 до 19:00'),'2026-11-30','2026-11-30').rows[0];
 assert.equal(r.status,'Вышел в свою смену');assert.equal(r.level,'green');
-console.log('Plan/fact checks passed: workshop boundaries, day/night, reentries, lunch, partial coverage, fixed daytime templates, employee identity.');
+
+assert.equal(shortName('Иванов Иван Иванович'),shortName('Иванов И.И.'));
+assert.equal(shortName('Иванов И. И.'),shortName('Иванов И.И.'));
+assert.equal(shortName('Семёнов Иван Иванович'),shortName('Семенов И.И.'));
+const monthPlan=schedule('11','FFFFFF',Array.from({length:30},(_,i)=>String(i+1)));
+const coveredEvents=events([
+  event('01-11-2026 06:40:00',O,H),event('01-11-2026 06:50:00',H,W),event('01-11-2026 19:00:00',W,H),event('01-11-2026 19:15:00',H,O),
+  event('11-11-2026 06:40:00',O,H),event('11-11-2026 06:50:00',H,W),
+]);
+const capped=buildShiftReport(coveredEvents,monthPlan,null,'2026-11-01','2026-11-30');
+assert.equal(capped.rows.length,11,'monthly plan must stop at last uploaded pass date');
+assert(capped.rows.every(x=>x.date<='2026-11-11'));
+const absent=capped.rows.find(x=>x.date==='2026-11-02');
+assert.equal(absent.status,'Нет отметок за плановую смену');assert.equal(absent.level,'red');
+assert.equal(capped.rows.at(-1).status,'Недостаточно данных','last incomplete shift must not become absence');
+assert.equal(buildShiftReport([],monthPlan,null,'2026-11-01','2026-11-30').rows.length,0,'plan alone must not generate future absences');
+assert.equal(buildShiftReport(coveredEvents,monthPlan,null,'2026-11-12','2026-11-30').rows.length,0);
+const conflicting=structuredClone(monthPlan);conflicting.people[0].conflict='Повтор табельного номера';
+assert.equal(buildShiftReport(coveredEvents,conflicting,null,'2026-11-02','2026-11-02').rows[0].level,'gray');
+const stranger=events([event('01-11-2026 06:40:00',O,H,'2','Чужой'),event('11-11-2026 19:10:00',H,O,'2','Чужой')]);
+const unmatched=buildShiftReport(stranger,monthPlan,null,'2026-11-02','2026-11-02').rows.find(x=>x.id==='1');
+assert.equal(unmatched.level,'gray');assert.equal(unmatched.status,'Недостаточно данных');
+const ambiguous=[...coveredEvents,...events([event('01-11-2026 06:40:00',O,H,'1','Тест','Другой цех'),event('11-11-2026 19:10:00',H,O,'1','Тест','Другой цех')])];
+const ambiguousRow=buildShiftReport(ambiguous,monthPlan,null,'2026-11-02','2026-11-02').rows.find(x=>x.plan.isWork);
+assert.equal(ambiguousRow.level,'gray');assert(ambiguousRow.comments.includes('Неоднозначное ФИО/подразделение'));
+console.log('Plan/fact checks passed: shop boundaries, day/night, reentries, lunch, partial coverage, fixed templates, initials, red missing shifts and report cutoff.');

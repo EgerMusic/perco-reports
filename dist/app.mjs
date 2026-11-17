@@ -12,6 +12,11 @@ const stamp = ts => ts == null ? '—' : new Date(ts).toLocaleString('ru-RU', {d
 const fmt = ms => ms == null ? '—' : duration(ms);
 const source = e => e ? `${e.fileName}${e.sheetName ? ` · лист ${e.sheetName}` : ''} · строка ${e.rowNumber}` : '';
 const notify = text => { $('notice').textContent = text; };
+// Remove copies kept by the previous release. This version only uses page memory.
+try {
+  const scope = location.pathname.replace(/\/index\.html$/i, '').replace(/\/+$/, '') || '/';
+  globalThis.indexedDB?.deleteDatabase(`perco-workspace-v1:${scope}`);
+} catch { /* Processing files also works when browser storage is unavailable. */ }
 const dateValue = r => r.date || r.period.replace('Неделя с ', '');
 const bySort = (a, b) => {
   const person = collator.compare(a.name, b.name) || collator.compare(a.employeeKey, b.employeeKey);
@@ -46,12 +51,15 @@ function timelineRows(rows) {
 }
 
 function recalculate() {
+  const lastDate = $('to-date').max;
+  if (lastDate && $('to-date').value > lastDate) $('to-date').value = lastDate;
   shiftReport = buildShiftReport(rawEvents, schedule, presence, $('from-date').value, $('to-date').value);
   const rows = [...shiftReport.rows].sort(bySort), shops = aggregateShops(shiftReport, $('group').value), shopRows = shops.rows.sort(bySort);
+  $('export-all').disabled = !rows.length;
   const headers = ['Дата смены','Сотрудник','Таб. №','План','Первый вход в цех','Последний выход из цеха','От входа до выхода','В цехах','Обед в цехе','Без обеда','График / комментарий','Источник плана','Источники входа и выхода'];
   const data = rows.map(r => [r.date,r.name,r.id,r.plan.label,stamp(r.first?.ts),stamp(r.last?.ts),fmt(r.span),fmt(r.observed?r.shopGross:null),fmt(r.observed?r.lunchShop:null),fmt(r.observed?Math.max(0,r.shopGross-r.lunchShop):null),[r.status,...comments(r)].join('\n'),r.planSource,[source(r.first),source(r.last)].filter(Boolean).join('\n')]);
   const uiHeaders = headers.filter((_,i)=>![7,8,9,11,12].includes(i));
-  renderTable('plant-table',uiHeaders,rows.map(r => `<tr><td class="datecell">${esc(r.date)}</td><td class="person">${esc(r.name)}<span class="sub">${esc(r.department)}</span></td><td class="small-muted">${esc(r.id)}</td><td class="plan-label" title="${esc(r.planSource)}">${esc(r.plan.label)}</td><td class="datecell" title="${esc(source(r.first))}"><b>${stamp(r.first?.ts)}</b></td><td class="datecell" title="${esc(source(r.last))}">${stamp(r.last?.ts)}</td><td class="num accent">${fmt(r.span)}</td><td class="schedule-cell"><span class="status-${r.level}">${esc(r.status)}</span>${comments(r).map(text=>`<span class="schedule-info">${esc(text)}</span>`).join('')}</td></tr>`));
+  renderTable('plant-table',uiHeaders,rows.map(r => `<tr class="result-${r.level}"><td class="datecell">${esc(r.date)}</td><td class="person">${esc(r.name)}<span class="sub">${esc(r.department)}</span></td><td class="small-muted">${esc(r.id)}</td><td class="plan-label" title="${esc(r.planSource)}">${esc(r.plan.label)}</td><td class="datecell" title="${esc(source(r.first))}"><b>${stamp(r.first?.ts)}</b></td><td class="datecell" title="${esc(source(r.last))}">${stamp(r.last?.ts)}</td><td class="num accent">${fmt(r.span)}</td><td class="schedule-cell"><span class="status-${r.level}">${esc(r.status)}</span>${comments(r).map(text=>`<span class="schedule-info">${esc(text)}</span>`).join('')}</td></tr>`));
   const shopHeaders = ['Период','Сотрудник','Таб. №','Цеха и время','В цехах','Обед в цехе','Без обеда','Столовая','Вне цехов','Неясно'];
   const shopData = shopRows.map(r=>[r.period,r.name,r.id,Object.entries(r.byShop).map(([s,ms])=>`${s}: ${duration(ms)}`).join('\n'),fmt(r.shopGross),fmt(r.lunchShop),fmt(Math.max(0,r.shopGross-r.lunchShop)),fmt(r.canteen),fmt(r.holding+r.other),fmt(r.unknown)]);
   renderTable('shop-table',shopHeaders,shopRows.map(r=>`<tr><td class="datecell">${esc(r.period)}</td><td class="person">${esc(r.name)}</td><td class="small-muted">${esc(r.id)}</td><td class="shop-cell">${shopVisual(r)}</td><td class="num">${fmt(r.shopGross)}</td><td class="num small-muted">${fmt(r.lunchShop)}</td><td class="num accent">${fmt(Math.max(0,r.shopGross-r.lunchShop))}</td><td class="num">${fmt(r.canteen)}</td><td class="num">${fmt(r.holding+r.other)}</td><td class="num">${fmt(r.unknown)}</td></tr>`));
@@ -77,6 +85,9 @@ function refresh(resetDates = false) {
   $('workspace').hidden = !rawEvents.length && !schedule;
   $('clear-data').hidden = !rawEvents.length && !schedule && !presence;
   if ($('workspace').hidden) return;
+  const sorted = dedupeEvents(rawEvents), lastDate = sorted.length ? localDate(sorted.at(-1).ts) : '';
+  $('from-date').max = lastDate;
+  $('to-date').max = lastDate;
   if (resetDates || !$('from-date').value) {
     if (schedule) {
       $('from-date').value = `${schedule.year}-${String(schedule.month).padStart(2,'0')}-01`;
@@ -125,5 +136,5 @@ $('clear-data').addEventListener('click',()=>{
   rawEvents=[];eventFiles=[];schedule=null;presence=null;shiftReport=null;exportSheets=[];
   $('workspace').hidden=true;$('clear-data').hidden=true;
   for(const id of ['file-list','schedule-label','presence-label'])$(id).textContent='Файл не выбран';
-  $('from-date').value='';$('to-date').value='';notify('Данные удалены.');
+  $('from-date').value='';$('to-date').value='';$('from-date').max='';$('to-date').max='';notify('Данные удалены.');
 });
