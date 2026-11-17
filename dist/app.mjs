@@ -2,13 +2,11 @@ import { parseEvents, dedupeEvents, duration, localDate } from './core.mjs';
 import { readXlsx } from './xlsx.mjs';
 import { parseSchedule, parsePresence, buildShiftReport, aggregateShops } from './plan.mjs';
 import { downloadWorkbook, excelStyle as S } from './export.mjs';
-import { loadWorkspace, saveWorkspace, clearWorkspace } from './storage.mjs';
 
 const $ = id => document.getElementById(id);
 const collator = new Intl.Collator('ru', { sensitivity: 'base', numeric: true });
 const shopColors = ['#eb8135','#2c8874','#4d7ea0','#9b755e','#836eac','#60926b','#ba786a','#7899a8'];
 let rawEvents = [], eventFiles = [], schedule = null, presence = null, shiftReport = null, exportSheets = [];
-let sourceFiles={events:[],schedule:null,presence:null},storageToken=null,storageQueue=Promise.resolve(),storageRevision=0;
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 const stamp = ts => ts == null ? '—' : new Date(ts).toLocaleString('ru-RU', {day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
 const fmt = ms => ms == null ? '—' : duration(ms);
@@ -22,30 +20,6 @@ const bySort = (a, b) => {
 };
 const styleFor = level => level === 'red' ? S.redRow : level === 'amber' ? S.amberRow : level === 'green' ? S.greenRow : S.grayRow;
 const styleStrong = level => level === 'red' ? S.red : level === 'amber' ? S.amber : level === 'green' ? S.green : S.plain;
-
-function busy(value){document.querySelectorAll('input,select,button').forEach(el=>{el.disabled=value;});$('workspace').setAttribute('aria-busy',String(value));}
-function storageStatus(text,error=false){$('storage-status').textContent=text;$('storage-status').classList.toggle('storage-error',error);}
-const fileCount=files=>files.events.length+Number(Boolean(files.schedule))+Number(Boolean(files.presence));
-const settings=()=>({from:$('from-date').value,to:$('to-date').value,group:$('group').value,sort:$('sort').value,tab:document.querySelector('.tab.active')?.dataset.tab||'plant'});
-function savedStatus(record){storageStatus(`Сохранено файлов в этом браузере: ${fileCount(record.files)} · ${new Date(record.savedAt).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}`);}
-function storageProblem(error){
-  const message=error.name==='QuotaExceededError'?'Недостаточно места в браузере. Файлы работают сейчас, но не сохранены для следующего открытия.':error.name==='StorageConflictError'?error.message:'Не удалось сохранить файлы в браузере. Они доступны только до закрытия страницы.';
-  storageStatus(message,true);
-}
-function persist(){
-  const revision=++storageRevision,files={events:[...sourceFiles.events],schedule:sourceFiles.schedule,presence:sourceFiles.presence},options=settings();
-  storageStatus('Сохраняю файлы в этом браузере…');
-  const task=storageQueue.then(async()=>{
-    const record=await saveWorkspace(files,options,storageToken);storageToken=record.token;
-    if(revision===storageRevision)savedStatus(record);
-  });
-  storageQueue=task.catch(error=>{if(revision===storageRevision)storageProblem(error);});
-  return storageQueue;
-}
-function selectTab(name){
-  document.querySelectorAll('.tab').forEach(tab=>{const active=tab.dataset.tab===name;tab.classList.toggle('active',active);tab.setAttribute('aria-selected',String(active));});
-  document.querySelectorAll('[data-panel]').forEach(panel=>{panel.hidden=panel.dataset.panel!==name;});
-}
 
 function renderTable(id, headers, rows) {
   $(id).innerHTML = `<thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${headers.length}" class="empty">Нет данных за выбранный период.</td></tr>`}</tbody>`;
@@ -123,79 +97,33 @@ function refresh(resetDates = false) {
 }
 $('files').addEventListener('change',async event=>{
   const selected=[...event.target.files]; if (!selected.length)return;
-  busy(true);notify('Читаю проходы…'); const errors=[]; let rejected=0;
-  try{
-    for (const file of selected) try {
-      if(sourceFiles.events.some(f=>f.name===file.name&&f.size===file.size&&f.lastModified===file.lastModified))continue;
-      const result=parseEvents(await readXlsx(file),file.name);
-      if(!result.events.length)throw new Error('В файле нет корректных событий.');
-      rawEvents.push(...result.events); rejected+=result.rejected.length;sourceFiles.events.push(file);
-      eventFiles.push(`${file.name} · ${result.events.length} отметок`);
-    } catch(error){ errors.push(`${file.name}: ${error.message}`); }
-    $('file-list').textContent=eventFiles.join(' / ')||'Файл не выбран';
-    refresh();notify([...errors,rejected?`Некорректных строк: ${rejected}`:''].filter(Boolean).join(' '));
-  }catch(error){notify(error.message);}
-  finally{$('files').value='';if(fileCount(sourceFiles))await persist();busy(false);}
+  notify('Читаю проходы…'); const errors=[]; let rejected=0;
+  for (const file of selected) try {
+    const result=parseEvents(await readXlsx(file),file.name); rawEvents.push(...result.events); rejected+=result.rejected.length;
+    eventFiles.push(`${file.name} · ${result.events.length} отметок`);
+  } catch(error){ errors.push(`${file.name}: ${error.message}`); }
+  $('file-list').textContent=eventFiles.join(' / ')||'Файл не выбран'; $('files').value='';
+  try { refresh(); notify([...errors,rejected?`Некорректных строк: ${rejected}`:''].filter(Boolean).join(' ')); } catch(error){notify(error.message);}
 });
 for (const [inputId,type,label] of [['schedule-file','schedule','schedule-label'],['presence-file','presence','presence-label']]) $(inputId).addEventListener('change',async event=>{
-  const file=event.target.files[0];if(!file)return;busy(true);notify('Читаю файл…');let loaded=false;
+  const file=event.target.files[0];if(!file)return;notify('Читаю файл…');
   try {
     const rows=await readXlsx(file,type);
     if(type==='schedule')schedule=parseSchedule(rows,file.name); else presence=parsePresence(rows,file.name);
-    sourceFiles[type]=file;loaded=true;
     $(label).textContent=`${file.name} · ${type==='schedule'?schedule.people.length:presence.people.length} сотрудников`;
     refresh(type==='schedule'); notify(type==='schedule'&&schedule.warnings.length?`В графике есть повторяющиеся табельные номера: ${schedule.warnings.length}. Они помечены в строках отчёта.`:'');
-  }catch(error){notify(error.message);}finally{event.target.value='';if(loaded)await persist();busy(false);}
+  }catch(error){notify(error.message);}finally{event.target.value='';}
 });
-for (const id of ['calculate','sort','group']) $(id).addEventListener(id==='calculate'?'click':'change',()=>{try{recalculate();notify('');if(fileCount(sourceFiles))void persist();}catch(error){notify(error.message);}});
-for(const id of ['from-date','to-date'])$(id).addEventListener('change',()=>{if(fileCount(sourceFiles))void persist();});
+for (const id of ['calculate','sort','group']) $(id).addEventListener(id==='calculate'?'click':'change',()=>{try{recalculate();notify('');}catch(error){notify(error.message);}});
 $('export-all').addEventListener('click',async()=>{try{recalculate();await downloadWorkbook(exportSheets,`PERCo_${$('from-date').value}_${$('to-date').value}.xlsx`);}catch(error){notify(`Не удалось создать Excel: ${error.message}`);}});
 document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>{
-  selectTab(tab.dataset.tab);if(fileCount(sourceFiles))void persist();
+  document.querySelectorAll('.tab').forEach(x=>{const active=x===tab;x.classList.toggle('active',active);x.setAttribute('aria-selected',String(active));});
+  document.querySelectorAll('[data-panel]').forEach(panel=>{panel.hidden=panel.dataset.panel!==tab.dataset.tab;});
 }));
-$('clear-data').addEventListener('click',async()=>{
-  if(!confirm('Удалить загруженные файлы и их сохранённые копии из этого браузера?'))return;
-  busy(true);++storageRevision;storageStatus('Удаляю сохранённые файлы…');
-  const task=storageQueue.then(()=>clearWorkspace(storageToken));storageQueue=task.catch(()=>{});
-  try{
-    const record=await task;storageToken=record.token;
-    rawEvents=[];eventFiles=[];schedule=null;presence=null;shiftReport=null;exportSheets=[];sourceFiles={events:[],schedule:null,presence:null};
-    $('workspace').hidden=true;$('clear-data').hidden=true;
-    for(const id of ['file-list','schedule-label','presence-label'])$(id).textContent='Файл не выбран';
-    for(const id of ['plant-table','shop-table','timeline-table','summary'])$(id).innerHTML='';
-    $('from-date').value='';$('to-date').value='';selectTab('plant');
-    storageStatus('Сохранённых файлов нет. Новые файлы сохранятся в этом браузере автоматически.');notify('Сохранённые файлы удалены.');
-  }catch(error){storageStatus(error.name==='StorageConflictError'?error.message:'Не удалось удалить сохранённые файлы. Повторите попытку.',true);}
-  finally{busy(false);}
+$('clear-data').addEventListener('click',()=>{
+  if(!confirm('Удалить загруженные данные?'))return;
+  rawEvents=[];eventFiles=[];schedule=null;presence=null;shiftReport=null;exportSheets=[];
+  $('workspace').hidden=true;$('clear-data').hidden=true;
+  for(const id of ['file-list','schedule-label','presence-label'])$(id).textContent='Файл не выбран';
+  $('from-date').value='';$('to-date').value='';notify('Данные удалены.');
 });
-
-async function restore(){
-  busy(true);storageStatus('Проверяю сохранённые файлы…');
-  let foundSaved=false;
-  try{
-    const saved=await loadWorkspace();storageToken=saved?.token??null;
-    if(!saved||saved.cleared){storageStatus('Файлы сохраняются автоматически в этом браузере.');return;}
-    foundSaved=true;
-    if(saved.version!==1||!saved.files||!Array.isArray(saved.files.events))throw new Error('Неподдерживаемый формат сохранения.');
-    const files=saved.files,restoredEvents=[],restoredLabels=[];let restoredSchedule=null,restoredPresence=null;
-    storageStatus('Восстанавливаю сохранённые файлы…');
-    for(const file of files.events){
-      const parsed=parseEvents(await readXlsx(file),file.name);restoredEvents.push(...parsed.events);restoredLabels.push(`${file.name} · ${parsed.events.length} отметок`);
-    }
-    if(files.schedule)restoredSchedule=parseSchedule(await readXlsx(files.schedule,'schedule'),files.schedule.name);
-    if(files.presence)restoredPresence=parsePresence(await readXlsx(files.presence,'presence'),files.presence.name);
-    sourceFiles=files;rawEvents=restoredEvents;eventFiles=restoredLabels;schedule=restoredSchedule;presence=restoredPresence;
-    $('file-list').textContent=eventFiles.join(' / ')||'Файл не выбран';
-    $('schedule-label').textContent=schedule?`${files.schedule.name} · ${schedule.people.length} сотрудников`:'Файл не выбран';
-    $('presence-label').textContent=presence?`${files.presence.name} · ${presence.people.length} сотрудников`:'Файл не выбран';
-    const options=saved.settings||{};
-    if(/^\d{4}-\d{2}-\d{2}$/.test(options.from)&&/^\d{4}-\d{2}-\d{2}$/.test(options.to)&&options.from<=options.to){$('from-date').value=options.from;$('to-date').value=options.to;}
-    if(['day','week','month'].includes(options.group))$('group').value=options.group;
-    if(['name','date-asc','date-desc'].includes(options.sort))$('sort').value=options.sort;
-    refresh();selectTab(['plant','shops','timeline'].includes(options.tab)?options.tab:'plant');savedStatus(saved);
-  }catch(error){
-    $('clear-data').hidden=!foundSaved;
-    storageStatus(foundSaved?'Не удалось восстановить сохранённые файлы. Загрузите их заново или удалите сохранение.':'Хранилище браузера недоступно. Можно работать с файлами, но их потребуется выбрать при следующем открытии.',true);
-  }finally{busy(false);}
-}
-void restore();
