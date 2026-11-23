@@ -22,7 +22,8 @@ assert.equal(r.rows.filter(x=>x.observed).length,2,'night shift followed by day 
 assert.equal(duration(r.rows[1].span),'12:10');
 const unknown=buildShiftReport(double.slice(0,4),plan(['непонятно']),presence('С 07:00 до 19:00'),'2026-11-01','2026-11-01').rows[0];
 assert.notEqual(unknown.status,'Выход вне графика','unknown plan code must not mean day off');
-assert(unknown.comments.some(c=>c.includes('обозначение')));
+assert(unknown.comments.some(c=>c.includes('«непонятно»') && c.includes('была ли назначена смена')));
+assert(unknown.comments.includes('Нужно ручное рассмотрение.'));
 assert(Number.isNaN(parseStamp('01-11-2026 07:65:00')),'invalid clock must not roll forward silently');
 assert.equal(normalizeId('00А1'),'00А1','alphanumeric employee IDs must preserve significant leading zeroes');
 const padded=headers.map(h=>' '+h+' '), paddedEvents=parseEvents([padded,event('01-11-2026 07:00:00',H,W)]).events;
@@ -35,4 +36,8 @@ assert.throws(()=>parseSchedule(duplicate),/повтор/i,'same planned person 
 const separated=[...parseEvents([headers,...[event('01-11-2026 06:40:00',O,H),event('01-11-2026 06:50:00',H,W),event('01-11-2026 19:00:00',W,H),event('01-11-2026 19:15:00',H,O)]],'part1.xlsx').events,...parseEvents([headers,...[event('03-11-2026 06:40:00',O,H),event('03-11-2026 06:50:00',H,W),event('03-11-2026 19:00:00',W,H),event('03-11-2026 19:15:00',H,O)]],'part3.xlsx').events];
 const uncovered=buildShiftReport(separated,plan(['11'],['FFFFFF'],'Ноябрь 2026',['2']),presence('С 07:00 до 19:00'),'2026-11-02','2026-11-02').rows[0];
 assert.equal(uncovered.status,'Недостаточно данных','a gap between uploaded files must not become absence');
+const unknownWithoutMarks=buildShiftReport(separated,plan(['б'],['FFFFFF'],'Ноябрь 2026',['2']),null,'2026-11-02','2026-11-02').rows[0];
+assert.equal(unknownWithoutMarks.level,'gray','unknown code without passes still needs a row');
+assert(unknownWithoutMarks.comments.some(c=>c.includes('«б»') && c.includes('не распознано')));
+assert(unknownWithoutMarks.comments.includes('Нужно ручное рассмотрение.'));
 console.log('Robustness checks passed: separate shifts, unknown codes, invalid timestamps, trimmed headers, new month/year, leap dates, duplicate roster rows.');

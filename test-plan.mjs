@@ -20,8 +20,8 @@ const complete=events([
 let r=buildShiftReport(complete,schedule(),presence('С 07:00 до 19:00'),'2026-11-01','2026-11-01').rows[0];
 assert.equal(duration(r.span),'11:50');
 assert.equal(r.level,'red');
-assert(r.comments.includes('Поздний вход в цех: 5 мин'));
-assert(r.comments.includes('Ранний выход из цеха: 5 мин'));
+assert(r.comments.includes('Поздний вход в цех на 5 мин. По графику 07:00, по отметке 07:05.'));
+assert(r.comments.includes('Ранний выход из цеха на 5 мин. По графику 19:00, по отметке 18:55.'));
 assert.equal(duration(r.lunchShop),'1:00');
 
 const night=events([event('30-11-2026 18:30:00',O,H),event('30-11-2026 18:50:00',H,W),event('01-12-2026 07:00:16',W,H),event('01-12-2026 07:20:00',H,O)]);
@@ -36,10 +36,10 @@ assert.equal(duration(aggregateShops(report,'month').rows[0].lunchShop),'1:00');
 
 const partial=complete.slice(0,2);
 r=buildShiftReport(partial,schedule(),presence('С 07:00 до 19:00'),'2026-11-01','2026-11-01').rows[0];
-assert.equal(r.last,null);assert(!r.comments.some(c=>c.startsWith('Ранний выход')));assert.equal(r.status,'Недостаточно данных');
+assert.equal(r.last,null);assert(!r.comments.some(c=>c.startsWith('Ранний выход')));assert(r.comments.some(c=>c.includes('нет отметки «выход из цеха»')));
 
 r=buildShiftReport(complete,schedule('11','808080'),presence('С 07:00 до 16:00'),'2026-11-01','2026-11-01').rows[0];
-assert.equal(new Date(r.plan.start).getHours(),7);assert.equal(new Date(r.plan.end).getHours(),16);assert(r.comments.includes('Ночная ячейка при дневном графике K'));
+assert.equal(new Date(r.plan.start).getHours(),7);assert.equal(new Date(r.plan.end).getHours(),16);assert(r.comments.some(c=>c.includes('12 ч с обедом') && c.includes('07:00–16:00, 9 ч')));
 r=buildShiftReport(complete,schedule('8'),presence('С 08:00 до 17:00'),'2026-11-01','2026-11-01').rows[0];
 assert.equal(new Date(r.plan.start).getHours(),8);assert.equal(new Date(r.plan.end).getHours(),17);
 
@@ -59,14 +59,20 @@ assert.equal(shortName('Семёнов Иван Иванович'),shortName('С
 const monthPlan=schedule('11','FFFFFF',Array.from({length:30},(_,i)=>String(i+1)));
 const coveredEvents=events([
   event('01-11-2026 06:40:00',O,H),event('01-11-2026 06:50:00',H,W),event('01-11-2026 19:00:00',W,H),event('01-11-2026 19:15:00',H,O),
+  event('02-11-2026 08:00:00',O,H,'2','Коллега'),
   event('11-11-2026 06:40:00',O,H),event('11-11-2026 06:50:00',H,W),
 ]);
 const capped=buildShiftReport(coveredEvents,monthPlan,null,'2026-11-01','2026-11-30');
-assert.equal(capped.rows.length,11,'monthly plan must stop at last uploaded pass date');
+assert.equal(capped.rows.filter(x=>x.id==='1').length,11,'monthly plan must stop at last uploaded pass date');
 assert(capped.rows.every(x=>x.date<='2026-11-11'));
 const absent=capped.rows.find(x=>x.date==='2026-11-02');
-assert.equal(absent.status,'Нет отметок за плановую смену');assert.equal(absent.level,'red');
-assert.equal(capped.rows.at(-1).status,'Недостаточно данных','last incomplete shift must not become absence');
+assert.equal(absent.status,'Не вышел на смену');assert.equal(absent.level,'red');
+assert.equal(absent.needsReview,false,'known no-show with complete coverage needs no extra warning');
+const missingDay=capped.rows.find(x=>x.id==='1'&&x.date==='2026-11-03');
+assert.equal(missingDay.level,'gray','a calendar day with no events inside a single file is not an absence');
+assert(missingDay.comments.some(c=>c.includes('нет ни одной отметки за 03.11.2026')));
+assert(missingDay.comments.includes('Нужно ручное рассмотрение.'));
+assert.equal(capped.rows.find(x=>x.id==='1'&&x.date==='2026-11-11').status,'Недостаточно данных','last incomplete shift must not become absence');
 assert.equal(buildShiftReport([],monthPlan,null,'2026-11-01','2026-11-30').rows.length,0,'plan alone must not generate future absences');
 assert.equal(buildShiftReport(coveredEvents,monthPlan,null,'2026-11-12','2026-11-30').rows.length,0);
 const conflicting=structuredClone(monthPlan);conflicting.people[0].conflict='Повтор табельного номера';
@@ -76,5 +82,5 @@ const unmatched=buildShiftReport(stranger,monthPlan,null,'2026-11-02','2026-11-0
 assert.equal(unmatched.level,'gray');assert.equal(unmatched.status,'Недостаточно данных');
 const ambiguous=[...coveredEvents,...events([event('01-11-2026 06:40:00',O,H,'1','Тест','Другой цех'),event('11-11-2026 19:10:00',H,O,'1','Тест','Другой цех')])];
 const ambiguousRow=buildShiftReport(ambiguous,monthPlan,null,'2026-11-02','2026-11-02').rows.find(x=>x.plan.isWork);
-assert.equal(ambiguousRow.level,'gray');assert(ambiguousRow.comments.includes('Неоднозначное ФИО/подразделение'));
+assert.equal(ambiguousRow.level,'gray');assert(ambiguousRow.comments.some(c=>c.includes('найдено несколько записей')));
 console.log('Plan/fact checks passed: shop boundaries, day/night, reentries, lunch, partial coverage, fixed templates, initials, red missing shifts and report cutoff.');
