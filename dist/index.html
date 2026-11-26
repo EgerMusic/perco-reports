@@ -13,9 +13,9 @@
     <section class="masthead"><div><div class="eyebrow">УЧЁТ ПРОХОДОВ / ВЕДОМОСТИ</div><h1>Рабочее время<br><em>по участкам</em></h1><p>Загрузи выгрузку PERCo и выбери период.</p></div><div class="pipe-photo" role="img" aria-label="Предизолированные трубы с пенополиуретановой изоляцией"></div></section>
     <section class="toolbar" aria-label="Исходные данные и параметры">
       <div class="upload-grid">
-        <div class="file-control"><label class="upload-button" for="files">Проходы PERCo</label><input id="files" type="file" accept=".xlsx" multiple><span id="file-list" class="file-list" aria-live="polite">Файл не выбран</span></div>
-        <div class="file-control"><label class="upload-button" for="schedule-file">Месячный график</label><input id="schedule-file" type="file" accept=".xlsx"><span id="schedule-label" class="file-list" aria-live="polite">Файл не выбран</span></div>
-        <div class="file-control"><label class="upload-button" for="presence-file">Сводка с графиками K</label><input id="presence-file" type="file" accept=".xlsx"><span id="presence-label" class="file-list" aria-live="polite">Файл не выбран</span></div>
+        <div class="file-control"><label class="upload-button" for="files">Проходы PERCo</label><input id="files" type="file" accept=".xlsx,.xls" multiple><span id="file-list" class="file-list" aria-live="polite">Файл не выбран</span></div>
+        <div class="file-control"><label class="upload-button" for="schedule-file">Месячные графики</label><input id="schedule-file" type="file" accept=".xlsx,.xls" multiple><span id="schedule-label" class="file-list" aria-live="polite">Файлы не выбраны</span></div>
+        <div class="file-control"><label class="upload-button" for="presence-file">Сводка с графиками K</label><input id="presence-file" type="file" accept=".xlsx,.xls"><span id="presence-label" class="file-list" aria-live="polite">Файл не выбран</span></div>
       </div><button id="clear-data" type="button" class="text-button" hidden>Очистить все файлы</button>
       <div id="workspace" hidden>
         <div class="filter-row"><label>С даты<input id="from-date" type="date"></label><label>По дату<input id="to-date" type="date"></label><label>Сортировка<select id="sort"><option value="name">По фамилии</option><option value="date-asc">По дате ↑</option><option value="date-desc">По дате ↓</option></select></label><button id="calculate" type="button" class="primary">Показать</button><button id="export-all" type="button" class="export-button">↓ Скачать Excel</button></div>
@@ -28,6 +28,8 @@
     </section>
     <div id="notice" class="notice" role="status" aria-live="polite"></div>
   </main>
-  <script src="vendor/jszip.min.js"></script><script type="module" src="app.mjs"></script>
+  <script src="vendor/jszip.min.js"></script>
+  <script src="vendor/xlsx.full.min.js"></script>
+  <script type="module" src="app.mjs"></script>
 </body>
 </html>

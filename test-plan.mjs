@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { parseEvents, duration } from './dist/core.mjs';
-import { parseSchedule, parsePresence, buildShiftReport, aggregateShops, shortName } from './dist/plan.mjs';
+import { parseSchedule, mergeSchedules, parsePresence, buildShiftReport, aggregateShops, shortName } from './dist/plan.mjs';
 
 const headers = ['Фамилия','Имя','Отчество','Табельный номер','Дата','Выход из','Вход в','Подразделение'];
 const O='Неконтролируемая территория', H='Территория холдинга', W='Цех №2';
@@ -83,4 +83,39 @@ assert.equal(unmatched.level,'gray');assert.equal(unmatched.status,'Недост
 const ambiguous=[...coveredEvents,...events([event('01-11-2026 06:40:00',O,H,'1','Тест','Другой цех'),event('11-11-2026 19:10:00',H,O,'1','Тест','Другой цех')])];
 const ambiguousRow=buildShiftReport(ambiguous,monthPlan,null,'2026-11-02','2026-11-02').rows.find(x=>x.plan.isWork);
 assert.equal(ambiguousRow.level,'gray');assert(ambiguousRow.comments.some(c=>c.includes('найдено несколько записей')));
+
+const firstRoster = schedule('11','FFFFFF',['1','2']);
+const nextMonthRoster = schedule('11','808080',['1'],'декабрь 2026');
+const sameDayRoster = { ...schedule('11','FFFFFF',['1']), fileName:'copy.xlsx' };
+sameDayRoster.people[0].days['2026-11-01'].source = 'copy.xlsx';
+const merged = mergeSchedules([nextMonthRoster, firstRoster, sameDayRoster]);
+assert.deepEqual([merged.fromDate,merged.toDate],['2026-11-01','2026-12-31']);
+assert.equal(merged.people.length,1);
+assert.deepEqual(Object.keys(merged.people[0].days).sort(),['2026-11-01','2026-11-02','2026-12-01']);
+assert(merged.people[0].days['2026-11-01'].source.includes('copy.xlsx'));
+assert.equal(merged.warnings.length,0);
+const conflictingRoster = mergeSchedules([firstRoster,schedule('в','FFFFFF',['1'])]);
+const rosterConflict = buildShiftReport(complete,conflictingRoster,null,'2026-11-01','2026-11-01').rows[0];
+assert(rosterConflict.needsReview && rosterConflict.level!=='red');
+assert(rosterConflict.comments.some(c=>c.includes('графики расходятся') && c.includes('«11 (дневная)»') && c.includes('«в»')));
+assert.equal(rosterConflict.first.from,H,'a conflicting plan must preserve actual marks');
+
+const nightInsteadOfDay = events([
+  event('01-11-2026 18:40:00',O,H),event('01-11-2026 18:50:00',H,W),
+  event('02-11-2026 07:05:00',W,H),event('02-11-2026 07:10:00',H,O),
+]);
+const rotatingRoster = mergeSchedules([firstRoster]);
+for (const profile of [null, presence('С 07:00 до 19:00')]) {
+  const workedNight = buildShiftReport(nightInsteadOfDay,rotatingRoster,profile,'2026-11-01','2026-11-01').rows[0];
+  assert.equal(workedNight.plan.night,true);
+  assert.equal(workedNight.status,'Вышел в свою смену');
+  assert.equal(workedNight.level,'green');
+  assert.equal(duration(workedNight.worked),'11:15');
+  assert.equal(duration(workedNight.span),'12:15','retain the gross span for existing calculations');
+}
+const fixedDay = buildShiftReport(nightInsteadOfDay,rotatingRoster,presence('С 07:00 до 16:00'),'2026-11-01','2026-11-01').rows[0];
+assert.equal(fixedDay.status,'Другая смена','a fixed daytime profile does not allow the substitution');
+const shortVisit = events([event('01-11-2026 06:50:00',H,W),event('01-11-2026 07:20:00',W,H)]);
+assert.equal(buildShiftReport(shortVisit,rotatingRoster,null,'2026-11-01','2026-11-01').rows[0].worked,0);
+assert.equal(buildShiftReport(partial,rotatingRoster,null,'2026-11-01','2026-11-01').rows[0].worked,null);
 console.log('Plan/fact checks passed: shop boundaries, day/night, reentries, lunch, partial coverage, fixed templates, initials, red missing shifts and report cutoff.');

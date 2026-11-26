@@ -88,6 +88,62 @@ export function parseSchedule(rows, fileName = '') {
   return { people, year, month, fileName, warnings };
 }
 
+export function mergeSchedules(schedules) {
+  if (!schedules.length) return null;
+  const peopleByIdentity = new Map();
+  const warnings = new Set(schedules.flatMap(s => s.warnings));
+  for (const schedule of schedules) for (const person of schedule.people) {
+    const key = identity(person);
+    if (!peopleByIdentity.has(key)) {
+      peopleByIdentity.set(key, { ...person, days: {}, dayChoices: new Map(), fullNames: new Set() });
+    }
+    const merged = peopleByIdentity.get(key);
+    const fullName = clean(person.name).split(' ').slice(1).filter(part => /^\p{L}{2,}$/u.test(part)).length >= 2;
+    if (fullName) merged.fullNames.add(clean(person.name));
+    for (const [date, day] of Object.entries(person.days)) {
+      if (!merged.dayChoices.has(date)) merged.dayChoices.set(date, new Map());
+      const choices = merged.dayChoices.get(date);
+      const shift = Number(day.code) === 11 ? day.knownColor ? day.night ? 'ночная' : 'дневная' : 'цвет не распознан' : '';
+      const value = shift ? `${day.code} (${shift})` : day.code;
+      if (!choices.has(value)) choices.set(value, { day, sources: new Set() });
+      choices.get(value).sources.add(day.source);
+    }
+  }
+  const people = [...peopleByIdentity.values()].map(({dayChoices, fullNames, ...person}) => {
+    if (fullNames.size > 1) {
+      person.conflict = `Для таб. № ${person.id} в месячных графиках указаны разные полные ФИО с одинаковыми инициалами.`;
+      warnings.add(person.conflict);
+    }
+    for (const [date, choices] of dayChoices) {
+      if (choices.size > 1) choices.delete('');
+      const [{ day }] = choices.values();
+      const source = [...new Set([...choices.values()].flatMap(choice => [...choice.sources]))].join('\n');
+      if (choices.size === 1) {
+        person.days[date] = { ...day, source };
+      } else {
+        const variants = [...choices].map(([value, choice]) => `«${value}» (${[...choice.sources].join(', ')})`);
+        const conflict = `На ${displayDate(date)} месячные графики расходятся. ${variants.join(' / ')}.`;
+        person.days[date] = { code:'', conflict, source };
+        warnings.add(`${person.name}. ${conflict}`);
+      }
+    }
+    return person;
+  });
+  for (const group of indexPeople(people, p => p.id).values()) if (group.length > 1) {
+    for (const person of group) {
+      person.conflict ||= 'Повтор табельного номера в месячных графиках';
+      warnings.add(`${person.name}. ${person.conflict} (${person.source}).`);
+    }
+  }
+  const ordered = [...schedules].sort((a,b) => a.year - b.year || a.month - b.month);
+  const first = ordered[0], last = ordered.at(-1);
+  return {
+    people, warnings: [...warnings],
+    fromDate: localDate(new Date(first.year, first.month - 1, 1, 12).getTime()),
+    toDate: localDate(new Date(last.year, last.month, 0, 12).getTime()),
+  };
+}
+
 export function parsePresence(rows, fileName = '') {
   const hi = rows.findIndex(row => row?.map(v => String(v ?? '').trim()).includes('Табельный номер') && row?.map(v => String(v ?? '').trim()).includes('График работы'));
   if (hi < 0) throw new Error('Не найдены столбцы сводки присутствия.');
@@ -161,6 +217,9 @@ function normFor(date, profile, night) {
 }
 
 function expected(date, day, profile, observedNight) {
+  if (day?.conflict) {
+    return { isWork:false, unknownCode:true, label:'Расхождение графиков', start:null, end:null, conflict:day.conflict };
+  }
   if (!day?.code && profile) return { ...normFor(date, profile, observedNight), isWork:false, checksTime:true, normOnly:true };
   const hours = Number(day?.code), isWork = Number.isFinite(hours) && hours > 0;
   if (!isWork) {
@@ -187,6 +246,17 @@ function expected(date, day, profile, observedNight) {
   if (monthlyWindow) return { ...monthlyWindow, isWork:true, night:day.night, label:day.night ? 'Ночная 19:00–07:00' : 'Дневная 07:00–19:00', normSource:day.source };
   const conflict = hours === 11 ? 'По цвету ячейки месячного графика не удалось определить, дневная или ночная смена.' : `В месячном графике указано ${day.code} ч, а в K нет часов для сравнения входа и выхода.`;
   return { isWork:true, start:null, end:null, label:`${day.code} ч по плану`, conflict };
+}
+
+function planForActual(date, day, profile, plan, group) {
+  const night = group[0].night;
+  if (plan.normOnly) return expected(date, day, profile, night);
+  const rotating = profile ? profile.rotating : Number(day?.code) === 11 && day.knownColor;
+  if (rotating && plan.isWork && plan.start != null && !plan.night && night &&
+      group.some(ep => ep.gateIn || ep.events.some(e => isShop(e.to)))) {
+    return expected(date, { ...day, night:true }, profile, true);
+  }
+  return plan;
 }
 
 function slotFor(ts, profile) {
@@ -570,7 +640,7 @@ export function buildShiftReport(events, schedule, presence, fromDate, toDate) {
         if (matched) jobs.push({ plan: planned, actual: matched });
         else jobs.push({ plan: planned, actual: [] });
         for (const actual of groups) if (actual !== matched) jobs.push({ plan: { isWork: false, knownOff: true, label: 'Вне плановой смены', start: null, end: null }, actual });
-      } else for (const actual of groups) jobs.push({ plan: planned.normOnly ? expected(date, day, profile, actual[0].night) : planned, actual });
+      } else for (const actual of groups) jobs.push({ plan: planForActual(date, day, profile, planned, actual), actual });
       for (const { plan, actual } of jobs) {
         const summaryFact = Boolean(person.summary || summaryFallback);
         const detailGate = !summaryFact && actual.some(ep => ep.gateIn || ep.gateOut) && !hasShopMarks(actual);
@@ -592,9 +662,10 @@ export function buildShiftReport(events, schedule, presence, fromDate, toDate) {
           sourceDays:summaryFact ? summaryDays : detailedDays, covers, gateFallback, summaryRecord });
         const factSource = gateFallback === 'summary' ? 'Сводка PERCo · проходная'
           : gateFallback === 'detail' ? 'Подробные проходы · проходная' : person.factSource;
+        const worked = fact.boundaryGood && !fact.messages.length && fact.span != null ? Math.max(0, fact.span - HOUR) : null;
         rows.push({ id:person.id, name:person.name, employeeKey:person.key, department:person.department || '', period:date, date,
           ts:actual[0]?.start ?? plan.start ?? onDate(date), plan, day, profile, accounting,
-          factSource, ...fact, ...result,
+          factSource, ...fact, worked, ...result,
           planSource:day?.source || '', sources:fact.all.map(e => ref(e.fileName, e.rowNumber, e.sheetName)) });
       }
     }

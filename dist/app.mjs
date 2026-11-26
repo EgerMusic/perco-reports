@@ -1,11 +1,12 @@
 import { parseEvents, duration, localDate } from './core.mjs';
-import { readXlsx } from './xlsx.mjs';
-import { parseSchedule, parsePresence, buildShiftReport, reportCoverage } from './plan.mjs';
+import { readWorkbook } from './xlsx.mjs';
+import { parseSchedule, mergeSchedules, parsePresence, buildShiftReport, reportCoverage } from './plan.mjs';
 import { downloadWorkbook, excelStyle as S } from './export.mjs';
 
 const $ = id => document.getElementById(id);
 const collator = new Intl.Collator('ru', { sensitivity: 'base', numeric: true });
-let rawEvents = [], eventFiles = [], schedule = null, presence = null, exportSheets = [], defaultEnd = '';
+let rawEvents = [], eventFiles = [], scheduleFiles = [], schedule = null, presence = null, exportSheets = [];
+let defaultStart = '', defaultEnd = '';
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 const stamp = ts => ts == null ? '—' : new Date(ts).toLocaleString('ru-RU', {day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
 const fmt = ms => ms == null ? '—' : duration(ms);
@@ -33,7 +34,7 @@ function gapText(row) {
   return row.gaps.length === 1 ? `Выходил с завода на ${duration(sum)}` : `Выходил с завода ${row.gaps.length} раз, всего ${duration(sum)}`;
 }
 const comments = r => [...r.comments, gapText(r)].filter(Boolean);
-const headers = ['Дата смены','Сотрудник','Таб. №','Норма смены','Первый вход','Последний выход','От входа до выхода','Статус / комментарий'];
+const headers = ['Дата смены','Сотрудник','Таб. №','Норма смены','Первый вход','Последний выход','Часы без обеда','Статус / комментарий'];
 const sourceHeaders = ['Основание учёта','Месячный график','Источник нормы','Источники входа и выхода'];
 const reportTabs = [
   { id: 'plant-table', name: 'Подробные проходы', factory: false },
@@ -41,7 +42,20 @@ const reportTabs = [
 ];
 
 function makeReportSheet(tab, rows) {
-  renderTable(tab.id, headers, rows.map(row => {
+  const totals = new Map();
+  rows.forEach((row, index) => {
+    const count = totals.get(row.employeeKey)?.count || 0;
+    totals.set(row.employeeKey, { last:index, count:count + Number(row.worked > 0) });
+  });
+  const lines = rows.flatMap((row, index) => {
+    const { last, count } = totals.get(row.employeeKey);
+    return index === last ? [{ row }, { row, count }] : [{ row }];
+  });
+  const totalText = count => `Отработано смен — ${count}`;
+  renderTable(tab.id, headers, lines.map(({ row, count }) => {
+    if (count !== undefined) {
+      return `<tr class="employee-total"><td colspan="6">Итого за период · ${esc(row.name)} · № ${esc(row.id)}</td><td colspan="2">${totalText(count)}</td></tr>`;
+    }
     const details = comments(row).map(text => `<span class="schedule-info">${esc(text)}</span>`).join('');
     return `<tr class="result-${row.level}">
       <td class="datecell">${esc(row.date)}</td>
@@ -50,7 +64,7 @@ function makeReportSheet(tab, rows) {
       <td class="plan-label" title="${esc(row.plan.normSource || row.planSource)}">${esc(row.plan.label)}<span class="sub">${esc(row.factSource)}</span></td>
       <td class="datecell" title="${esc(source(row.first))}"><b>${stamp(row.first?.ts)}</b></td>
       <td class="datecell" title="${esc(source(row.last))}">${stamp(row.last?.ts)}</td>
-      <td class="num accent">${fmt(row.span)}</td>
+      <td class="num accent">${fmt(row.worked)}</td>
       <td class="schedule-cell"><span class="status-${row.level}">${esc(row.status)}</span>${details}</td>
     </tr>`;
   }));
@@ -58,14 +72,17 @@ function makeReportSheet(tab, rows) {
   return {
     name: tab.name,
     headers: [...headers, ...sourceHeaders],
-    rows: rows.map(row => [
-      row.date, row.name, row.id, row.plan.label, stamp(row.first?.ts), stamp(row.last?.ts), fmt(row.span),
-      [row.status, ...comments(row)].join('\n'), row.factSource, row.planSource, row.plan.normSource || '',
-      [...new Set([source(row.first),source(row.last)].filter(Boolean))].join('\n'),
-    ]),
-    columnWidths: [15, 30, 12, 27, 24, 24, 23, 74, 26, 43, 43, 49],
-    rowStyles: rows.map(row => styleFor(row.level)),
-    cellStyles: rows.map(row => ({ 7: styleStrong(row.level) })),
+    rows: lines.map(({ row, count }) => {
+      if (count !== undefined) return ['Итого за период', row.name, row.id, '', '', '', '', totalText(count), '', '', '', ''];
+      return [
+        row.date, row.name, row.id, row.plan.label, stamp(row.first?.ts), stamp(row.last?.ts), fmt(row.worked),
+        [row.status, ...comments(row)].join('\n'), row.factSource, row.planSource, row.plan.normSource || '',
+        [...new Set([source(row.first),source(row.last)].filter(Boolean))].join('\n'),
+      ];
+    }),
+    columnWidths: [18, 30, 12, 27, 24, 24, 23, 74, 26, 43, 43, 49],
+    rowStyles: lines.map(({ row, count }) => count === undefined ? styleFor(row.level) : S.blueRow),
+    cellStyles: lines.map(({ row, count }) => ({ 7: count === undefined ? styleStrong(row.level) : S.blue })),
   };
 }
 
@@ -94,23 +111,21 @@ function refresh(resetDates = false) {
   $('from-date').max = lastDate;
   $('to-date').max = lastDate;
   let from = range ? localDate(range.start) : '', to = lastDate;
-  if (schedule) {
-    const monthFrom = `${schedule.year}-${String(schedule.month).padStart(2,'0')}-01`;
-    const monthTo = localDate(new Date(schedule.year,schedule.month,0,12).getTime());
-    if (!range || from > monthTo || to < monthFrom) {
-      from = monthFrom;
-      to = monthTo;
-    } else {
-      if (from < monthFrom) from = monthFrom;
-      if (to > monthTo) to = monthTo;
-    }
+  if (schedule && !range) {
+    from = schedule.fromDate;
+    to = schedule.toDate;
+  } else if (schedule && from <= schedule.toDate && to >= schedule.fromDate) {
+    if (from < schedule.fromDate) from = schedule.fromDate;
+    if (to > schedule.toDate) to = schedule.toDate;
   }
-  if (resetDates || !$('from-date').value) {
+  if (resetDates || !$('from-date').value || lastDate && $('from-date').value > lastDate) {
     $('from-date').value = from;
     $('to-date').value = to;
-  } else if ($('to-date').value === defaultEnd) {
-    $('to-date').value = to;
+  } else {
+    if ($('from-date').value === defaultStart) $('from-date').value = from;
+    if ($('to-date').value === defaultEnd) $('to-date').value = to;
   }
+  defaultStart = from;
   defaultEnd = to;
   recalculate();
 }
@@ -118,20 +133,45 @@ $('files').addEventListener('change',async event=>{
   const selected=[...event.target.files]; if (!selected.length)return;
   notify('Читаю проходы…'); const errors=[]; let rejected=0;
   for (const file of selected) try {
-    const result=parseEvents(await readXlsx(file),file.name); rawEvents.push(...result.events); rejected+=result.rejected.length;
+    const result=parseEvents(await readWorkbook(file),file.name); rawEvents.push(...result.events); rejected+=result.rejected.length;
     eventFiles.push(`${file.name} · ${result.events.length} отметок`);
   } catch(error){ errors.push(`${file.name}: ${error.message}`); }
   $('file-list').textContent=eventFiles.join(' / ')||'Файл не выбран'; $('files').value='';
   try { refresh(); notify([...errors,rejected?`Некорректных строк: ${rejected}`:''].filter(Boolean).join(' ')); } catch(error){notify(error.message);}
 });
-for (const [inputId,type,label] of [['schedule-file','schedule','schedule-label'],['presence-file','presence','presence-label']]) $(inputId).addEventListener('change',async event=>{
+$('schedule-file').addEventListener('change',async event=>{
+  const input = event.target, files = [...input.files];
+  if (!files.length) return;
+  const previous = scheduleFiles, added = [], errors = [];
+  input.disabled = true;
+  notify('Читаю месячные графики…');
+  try {
+    for (const file of files) {
+      try { added.push(parseSchedule(await readWorkbook(file, 'schedule'), file.name)); }
+      catch(error) { errors.push(`${file.name}: ${error.message}`); }
+    }
+    if (previous !== scheduleFiles) return;
+    if (added.length) {
+      const updated = [...previous, ...added];
+      schedule = mergeSchedules(updated);
+      scheduleFiles = updated;
+      const filenames = updated.map(file => file.fileName).join(' / ');
+      $('schedule-label').textContent = filenames;
+      $('schedule-label').title = filenames;
+      refresh(true);
+    }
+    if (schedule?.warnings.length) errors.push(`Замечаний в графиках — ${schedule.warnings.length}. Подробности в строках отчёта.`);
+    notify(errors.join(' '));
+  } catch(error) { notify(error.message); }
+  finally { input.value = ''; input.disabled = false; }
+});
+$('presence-file').addEventListener('change',async event=>{
   const file=event.target.files[0];if(!file)return;notify('Читаю файл…');
   try {
-    const rows=await readXlsx(file,type);
-    if(type==='schedule')schedule=parseSchedule(rows,file.name); else presence=parsePresence(rows,file.name);
-    $(label).textContent=`${file.name} · ${type==='schedule'?schedule.people.length:presence.people.length} сотрудников`;
-    refresh(type==='schedule'); notify(type==='schedule'&&schedule.warnings.length?`В графике есть повторяющиеся табельные номера: ${schedule.warnings.length}. Они помечены в строках отчёта.`:'');
-  }catch(error){notify(error.message);}finally{event.target.value='';}
+    presence=parsePresence(await readWorkbook(file,'presence'),file.name);
+    $('presence-label').textContent=`${file.name} · ${presence.people.length} сотрудников`;
+    refresh();notify('');
+  } catch(error) {notify(error.message);} finally {event.target.value='';}
 });
 for (const id of ['calculate','sort']) $(id).addEventListener(id==='calculate'?'click':'change',()=>{try{recalculate();notify('');}catch(error){notify(error.message);}});
 $('export-all').addEventListener('click',async()=>{try{recalculate();await downloadWorkbook(exportSheets,`PERCo_${$('from-date').value}_${$('to-date').value}.xlsx`);}catch(error){notify(`Не удалось создать Excel: ${error.message}`);}});
@@ -141,8 +181,10 @@ document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>
 }));
 $('clear-data').addEventListener('click',()=>{
   if(!confirm('Удалить загруженные данные?'))return;
-  rawEvents=[];eventFiles=[];schedule=null;presence=null;exportSheets=[];defaultEnd='';
+  rawEvents=[];eventFiles=[];scheduleFiles=[];schedule=null;presence=null;exportSheets=[];defaultStart='';defaultEnd='';
   $('workspace').hidden=true;$('clear-data').hidden=true;
-  for(const id of ['file-list','schedule-label','presence-label'])$(id).textContent='Файл не выбран';
+  for(const id of ['file-list','presence-label'])$(id).textContent='Файл не выбран';
+  $('schedule-label').textContent='Файлы не выбраны';
+  $('schedule-label').removeAttribute('title');
   $('from-date').value='';$('to-date').value='';$('from-date').max='';$('to-date').max='';notify('Данные удалены.');
 });

@@ -50,6 +50,36 @@ function inRange(ref, range) {
   return c>=column(a)&&c<=column(b)&&r>=Number(a.match(/\d+/)?.[0])&&r<=Number(b.match(/\d+/)?.[0]);
 }
 
+function workbookRows(type) {
+  const result = [], cellStyles = [], rowSources = [], matchedSheets = [];
+  const headers = {
+    schedule: row => row.includes('ФИО') && row.some(cell => /^Таб\./i.test(cell)),
+    presence: row => ['Табельный номер', 'График работы', 'Вход'].every(cell => row.includes(cell)),
+    events: row => ['Табельный номер', 'Выход из', 'Вход в'].every(cell => row.includes(cell)),
+  };
+  return {
+    add(sheetName, rows, styles) {
+      if (!rows.some(row => headers[type]((row || []).map(value => String(value ?? '').trim())))) return;
+      matchedSheets.push(sheetName);
+      for (let i = 0; i < rows.length; i++) {
+        result.push(rows[i] || []);
+        cellStyles.push(styles[i] || []);
+        rowSources.push({ sheetName, rowNumber:i + 1 });
+      }
+    },
+    finish() {
+      if (!matchedSheets.length) {
+        throw new Error({
+          schedule:'Не найден месячный график с ФИО и табельными номерами.',
+          presence:'Не найден отчёт «Время присутствия» с графиком работы.',
+          events:'Не найден отчёт о проходах с полями «Выход из» и «Вход в».',
+        }[type]);
+      }
+      return Object.assign(result, { cellStyles, rowSources, sheetName:matchedSheets.join(', ') });
+    },
+  };
+}
+
 export async function readXlsx(file, type = 'events') {
   if (!globalThis.JSZip) throw new Error('Не загружен модуль чтения Excel.');
   const zip = await JSZip.loadAsync(await file.arrayBuffer()), workbookFile=zip.file('xl/workbook.xml');
@@ -73,7 +103,7 @@ export async function readXlsx(file, type = 'events') {
     if(/^[0-9a-f]{6}$/i.test(rgb)&&tint)rgb=rgb.match(/../g).map(v=>{const c=parseInt(v,16);return Math.round(tint<0?c*(1+tint):c+(255-c)*tint).toString(16).padStart(2,'0');}).join('');
     return rgb.toUpperCase();
   });
-  const result=[],cellStyles=[],rowSources=[],matchedSheets=[];
+  const result = workbookRows(type);
   for(const sheetInfo of descendants(workbook,'sheet')){
     const relId=sheetInfo.getAttribute('r:id')||sheetInfo.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships','id');
     const target=descendants(rels,'Relationship').find(r=>r.getAttribute('Id')===relId)?.getAttribute('Target');
@@ -92,17 +122,84 @@ export async function readXlsx(file, type = 'events') {
       }
       rows[ri]=values;sheetStyles[ri]=rowStyles;
     }
-    const trimmed=rows.map(row=>(row||[]).map(v=>String(v??'').trim()));
-    const matches=type==='schedule'?trimmed.some(r=>r.includes('ФИО')&&r.some(c=>/^Таб\./i.test(c)))
-      :type==='presence'?trimmed.some(r=>r.includes('Табельный номер')&&r.includes('График работы')&&r.includes('Вход'))
-      :trimmed.some(r=>r.includes('Табельный номер')&&r.includes('Выход из')&&r.includes('Вход в'));
-    if(!matches)continue;
-    const sheetName=sheetInfo.getAttribute('name');matchedSheets.push(sheetName);
-    for(let ri=0;ri<rows.length;ri++){
-      result.push(rows[ri]||[]);cellStyles.push(sheetStyles[ri]||[]);rowSources.push({sheetName,rowNumber:ri+1});
-    }
+    result.add(sheetInfo.getAttribute('name'), rows, sheetStyles);
   }
-  if(!matchedSheets.length)throw new Error(type==='schedule'?'Не найден месячный график с ФИО и табельными номерами.':type==='presence'?'Не найден отчёт «Время присутствия» с графиком работы.':'Не найден отчёт о проходах с полями «Выход из» и «Вход в».');
-  result.cellStyles=cellStyles;result.rowSources=rowSources;result.sheetName=matchedSheets.join(', ');
-  return result;
+  return result.finish();
+}
+
+function legacyCellText(cell, address, epoch1904, legacy) {
+  if (cell.t === 'e') throw new Error(`Ошибка Excel ${legacy.utils.format_cell(cell)} в ячейке ${address}.`);
+  if (cell.f && (cell.v == null || cell.t === 'z')) {
+    throw new Error(`У формулы в ячейке ${address} нет сохранённого результата. Пересчитайте книгу в Excel.`);
+  }
+  if (cell.t === 'n') return dateText(String(cell.v), 0, cell.z || '', epoch1904);
+  return String(cell.v ?? '');
+}
+
+function legacyFill(style) {
+  if (!style?.patternType || style.patternType === 'none') return 'FFFFFF';
+  const rgb = style.fgColor?.rgb?.slice(-6);
+  return style.patternType === 'solid' && /^[0-9a-f]{6}$/i.test(rgb) ? rgb.toUpperCase() : 'UNKNOWN';
+}
+
+// BIFF8's CondFmt and CondFmt12 records contain the formatted cell ranges.
+function legacyConditionalRanges(container) {
+  const content = container?.FileIndex.find(entry => /^(?:Workbook|Book)$/i.test(entry.name))?.content;
+  if (!content) return new Map();
+  const data = content instanceof Uint8Array ? content : Uint8Array.from(content);
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const sheets = new Map(), ranges = new Map();
+  let sheetName;
+  for (let offset = 0; offset + 4 <= view.byteLength;) {
+    const record = view.getUint16(offset, true), size = view.getUint16(offset + 2, true);
+    const start = offset + 4, end = start + size;
+    if (end > view.byteLength) break;
+    if (record === 0x0085 && size >= 8 && view.getUint8(start + 5) === 0) {
+      const count = view.getUint8(start + 6), wide = view.getUint8(start + 7) & 1;
+      if (start + 8 + count * (wide + 1) <= end) {
+        const name = new TextDecoder(wide ? 'utf-16le' : 'windows-1252').decode(data.subarray(start + 8, start + 8 + count * (wide + 1)));
+        sheets.set(view.getUint32(start, true), name);
+      }
+    }
+    if (sheets.has(offset)) sheetName = sheets.get(offset);
+    if (sheetName && (record === 0x01b0 || record === 0x0879)) {
+      const list = start + (record === 0x0879 ? 24 : 12);
+      if (list + 2 <= end) {
+        if (!ranges.has(sheetName)) ranges.set(sheetName, []);
+        const count = view.getUint16(list, true);
+        for (let p = list + 2; p + 8 <= Math.min(end, list + 2 + count * 8); p += 8) {
+          ranges.get(sheetName).push([0, 2, 4, 6].map(delta => view.getUint16(p + delta, true)));
+        }
+      }
+    }
+    if (record === 0x000a) sheetName = undefined;
+    offset = end;
+  }
+  return ranges;
+}
+
+export async function readWorkbook(file, type = 'events') {
+  if (!/\.xls$/i.test(file.name)) return readXlsx(file, type);
+  const legacy = globalThis.XLSX;
+  if (!legacy) throw new Error('Не загружен модуль чтения XLS.');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes[0] === 0x50 && bytes[1] === 0x4b) return readXlsx(file, type);
+  const workbook = legacy.read(bytes, { type:'array', cellNF:true, cellStyles:true, cellText:false, sheetStubs:true, bookFiles:type === 'schedule' });
+  const result = workbookRows(type), epoch1904 = workbook.Workbook?.WBProps?.date1904;
+  const formatRanges = legacyConditionalRanges(workbook.cfb);
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName], rows = [], styles = [];
+    const ranges = formatRanges.get(sheetName) || [];
+    for (const [address, cell] of Object.entries(sheet)) {
+      if (address.startsWith('!')) continue;
+      const { r, c } = legacy.utils.decode_cell(address);
+      (rows[r] ||= [])[c] = legacyCellText(cell, address, epoch1904, legacy);
+      (styles[r] ||= [])[c] = {
+        fillColor:legacyFill(cell.s),
+        conditional:ranges.some(([firstRow, lastRow, firstCol, lastCol]) => r >= firstRow && r <= lastRow && c >= firstCol && c <= lastCol),
+      };
+    }
+    result.add(sheetName, rows, styles);
+  }
+  return result.finish();
 }
